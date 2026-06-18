@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension for vector similarity search
+  vectordb:
+    image: ankane/pgvector:latest
+    container_name: scropen_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: scropen
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/core/infrastructure/storage/drizzle/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - scropen_network
+
+  # Redis for BullMQ job queue
+  redis:
+    image: redis:7-alpine
+    container_name: scropen_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - scropen_network
+
+  # Local AI: Ollama service for embedding and chat models
+  # Entrypoint auto-pulls required models on first boot
+  ollama:
+    image: ollama/ollama:latest
+    container_name: scropen_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: [ "/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull nomic-embed-text && ollama pull gemma3 && wait" ]
+    networks:
+      - scropen_network
+
+  # Next.js frontend and API layer
+  nextapp:
+    build: .
+    container_name: scropen_next
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password123@vectordb:5432/scropen
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_HOST=http://ollama:11434
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - vectordb
+      - redis
+      - ollama
+    networks:
+      - scropen_network
+
+  # Background worker: consumes BullMQ jobs for scraping and indexing
+  scraper_worker:
+    build: .
+    container_name: scropen_worker
+    command: npx tsx worker.ts
+    environment:
+      - DATABASE_URL=postgresql://postgres:password123@vectordb:5432/scropen
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_HOST=http://ollama:11434
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - vectordb
+      - ollama
+    networks:
+      - scropen_network
+
+volumes:
+  pgdata:
+  ollama_data:
+
+networks:
+  scropen_network:
+    driver: bridge
